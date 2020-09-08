@@ -118,9 +118,8 @@ def get_user_by_id(request, userinfo):
         prefix_username = preferred_username.encode('latin1').decode('utf-8')
     except Exception:
         prefix_username = preferred_username
-    
-    plus_subdomain = '+'.decode('utf-8') + subdomain.decode('utf-8')
-    username = prefix_username + plus_subdomain
+
+    username = prefix_username + "+" + subdomain
 
     check_username(username)
 
