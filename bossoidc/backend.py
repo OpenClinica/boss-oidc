@@ -149,22 +149,25 @@ def get_user_by_id(request, userinfo):
     except KeycloakModel.DoesNotExist: # user doesn't exist with a keycloak UID and subdomain
         try:
             user = UserModel.objects.get_by_natural_key(username)
+            try:
+                # Get kc_user for user as kc_user_old
+                kc_user_old = KeycloakModel.objects.get(user=user)
+                if kc_user_old.UID != uid:
+                    fmt = "Updating user '{}' because the Keycloak uid is changed"
+                    _log('get_user_by_id').info(fmt.format(username))
 
-            fmt = "Deleting user '{}' becuase it matches the authenticated Keycloak username"
-            _log('get_user_by_id').info(fmt.format(username))
+                    # Update user keycloak uid
+                    kc_user_old.UID = uid
+                    kc_user_old.save(update_fields=["UID"])
 
-            # remove existing user account, so permissions are not transfered
-            # DP NOTE: required, as the username field is still a unique field,
-            #          which doesn't allow multiple users in the table with the
-            #          same username
-            user.delete()
+                    kc_user = kc_user_old
+            except KeycloakModel.DoesNotExist:
+                pass
         except UserModel.DoesNotExist:
-            pass
+            args = {UserModel.USERNAME_FIELD: username, 'defaults': openid_data, }
+            user, created = UserModel.objects.update_or_create(**args)
+            kc_user = KeycloakModel.objects.create(user=user, UID=uid, subdomain=subdomain)
 
-        args = {UserModel.USERNAME_FIELD: username, 'defaults': openid_data, }
-        user, created = UserModel.objects.update_or_create(**args)
-        kc_user = KeycloakModel.objects.create(user = user, UID = uid, subdomain = subdomain)
-            
     if kc_user:
         kc_user.user_type = userinfo['https://www.openclinica.com/userContext']['userType']
         kc_user.save()
