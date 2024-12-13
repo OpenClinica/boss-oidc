@@ -174,7 +174,7 @@ if __name__ == '__main__':
         description='Django Authentication OpenID Connect plugin for the Boss SSO',
         long_description=read('README.md'),
         install_requires = [
-            'django<2.0',
+            'django<2.3',
             'djangorestframework',
             'oic==0.13.0', # Pinned due to issues with the library
             'pyjwkest>=1.0.0',
