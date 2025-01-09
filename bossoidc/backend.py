@@ -15,13 +15,12 @@
 import datetime
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.db import transaction, connection, IntegrityError, DatabaseError
+from django.utils.translation import ugettext as _
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.settings import import_from_string
 from rest_framework.authentication import get_authorization_header
-
-from django.utils.translation import ugettext as _
 from djangooidc.backends import OpenIdConnectBackend as DOIDCBackend
-
 from bossoidc.models import Keycloak as KeycloakModel
 from jwkest.jwt import JWT
 
@@ -153,14 +152,70 @@ def get_user_by_id(request, userinfo):
                 # Get kc_user for user as kc_user_old
                 kc_user_old = KeycloakModel.objects.get(user=user)
                 if kc_user_old.UID != uid:
-                    fmt = "Updating user '{}' because the Keycloak uid is changed"
+                    fmt = "Updating user '{}' because the Keycloak UID is changed"
                     _log('get_user_by_id').info(fmt.format(username))
 
-                    # Update user keycloak uid
-                    kc_user_old.UID = uid
-                    kc_user_old.save(update_fields=["UID"])
+                    try:
+                        # Check if the new Keycloak UID already exists anywhere
+                        existing_uid = KeycloakModel.objects.filter(UID=uid).exists()
+                        
+                        if existing_uid:
+                            _log('get_user_by_id').error(
+                                f"Cannot update Keycloak UID: {uid} already exists in the database"
+                            )
+                            raise AuthenticationFailed("User authentication conflict detected")
 
-                    kc_user = kc_user_old
+                        with transaction.atomic():
+                            # Lock the row we're going to update to prevent race conditions
+                            kc_user_to_update = KeycloakModel.objects.select_for_update().get(
+                                UID=kc_user_old.UID
+                            )
+                            
+                            # Double-check nothing changed while we were checking
+                            if kc_user_to_update.UID != kc_user_old.UID:
+                                raise DatabaseError("Record changed during update process")
+
+                            with connection.cursor() as cursor:
+                                cursor.execute("""
+                                    UPDATE bossoidc_keycloak 
+                                    SET UID = %s
+                                    WHERE UID = %s
+                                    """, [uid, kc_user_old.UID])
+                                
+                                if cursor.rowcount != 1:
+                                    raise DatabaseError(
+                                        f"Expected to update 1 record, but updated {cursor.rowcount}"
+                                    )
+                            
+                            kc_user = kc_user_old
+                            # Refresh from db to ensure we have the updated data
+                            kc_user.refresh_from_db()
+                            
+                            _log('get_user_by_id').info(
+                                f"Successfully updated Keycloak UID from {kc_user_old.UID} to {uid}"
+                            )
+
+                    except KeycloakModel.DoesNotExist:
+                        _log('get_user_by_id').error(
+                            f"Record not found during update: UID={kc_user_old.UID}"
+                        )
+                        raise AuthenticationFailed("User record not found")
+                    except IntegrityError as e:
+                        _log('get_user_by_id').error(
+                            f"Failed to update Keycloak UID - integrity error: {str(e)}"
+                        )
+                        raise AuthenticationFailed("Unable to update user authentication details")
+                    except DatabaseError as e:
+                        _log('get_user_by_id').error(
+                            f"Failed to update Keycloak UID - database error: {str(e)}"
+                        )
+                        raise AuthenticationFailed("Unable to update user authentication details")
+                    except Exception as e:
+                        _log('get_user_by_id').error(
+                            f"Unexpected error updating Keycloak UID: {str(e)}, "
+                            f"type: {type(e).__name__}"
+                        )
+                        raise AuthenticationFailed("Authentication update failed")
             except KeycloakModel.DoesNotExist:
                 pass
         except UserModel.DoesNotExist:
